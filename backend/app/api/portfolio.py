@@ -70,7 +70,8 @@ async def analyze_guest(
     Rate-limited by browser cookie (soft UX check) + Redis IP counter (hard backstop).
     Fetches real prices, runs optimizer, returns genuine analysis.
     """
-    from app.data.cache import get_price
+    import asyncio
+    from app.data.cache import get_prices
     from app.services.optimizer import PortfolioOptimizer, expected_return_for_class
     from app.core.market import get_usd_pkr_rate, get_sbp_rate
     from app.data.adapters.yfinance_adapter import YFinanceAdapter
@@ -112,8 +113,14 @@ async def analyze_guest(
     )
 
     # Fetch shared rates once — no hardcoded USD/PKR anywhere below
-    usd_pkr = await get_usd_pkr_rate()
-    sbp_rate = await get_sbp_rate()  # Decimal e.g. 0.20 for 20%
+    usd_pkr, sbp_rate = await asyncio.gather(get_usd_pkr_rate(), get_sbp_rate())  # sbp_rate: Decimal e.g. 0.20 for 20%
+
+    # One concurrent price fetch for every market-priced holding (tbill/bond are
+    # valued from their own rate, not a market price).
+    prices = await get_prices([
+        h.symbol.strip() for h in payload.holdings
+        if h.asset_class in ("equity", "crypto", "commodity")
+    ])
 
     holdings_data = []
     total_value = Decimal("0")
@@ -137,7 +144,7 @@ async def analyze_guest(
         cost_basis_pkr: Decimal
 
         if ac == "equity":
-            price_pkr = await get_price(symbol, db)
+            price_pkr = prices.get(symbol)
             if price_pkr is None:
                 try:
                     r = await YFinanceAdapter(max_retries=1).fetch_price(symbol)
@@ -159,11 +166,11 @@ async def analyze_guest(
                 current_value_pkr = h.qty  # face value if no buy date provided
 
         elif ac == "crypto":
-            price_usd = await get_price(symbol, db)
+            price_usd = prices.get(symbol)
             if price_usd is None:
                 try:
-                    prices = await CoinGeckoAdapter().fetch_prices([symbol])
-                    price_usd = prices.get(symbol)
+                    cg_prices = await CoinGeckoAdapter().fetch_prices([symbol])
+                    price_usd = cg_prices.get(symbol)
                 except Exception:
                     price_usd = None
             if price_usd is None:
@@ -172,7 +179,7 @@ async def analyze_guest(
             current_value_pkr = h.qty * price_usd * usd_pkr
 
         elif ac == "commodity":
-            price_usd_oz = await get_price(symbol, db)
+            price_usd_oz = prices.get(symbol)
             if price_usd_oz is None:
                 try:
                     r = await YFinanceAdapter(max_retries=1).fetch_price(symbol)
@@ -547,12 +554,15 @@ async def suggest_portfolio(
     db.add(draft_portfolio)
     await db.flush()
 
+    from app.data.cache import get_prices
+    held = [s for s, w in weights.items() if w > 0 and s in instrument_map]
+    prices = await get_prices(held, db) if held else {}
+
     for symbol, weight in weights.items():
         if weight <= 0 or symbol not in instrument_map:
             continue
         inst = instrument_map[symbol]
-        from app.data.cache import get_price
-        price = await get_price(symbol, db)
+        price = prices.get(symbol.upper())
         if price is None:
             price = Decimal("100")
         qty = (capital * weight) / price
@@ -799,7 +809,7 @@ async def _recompute_weights(portfolio: Portfolio, db: AsyncSession) -> Optional
     """Recompute each holding's actual_weight from current market value so the
     weights reflect reality after a buy/sell, and return a concentration warning
     when any single sector exceeds 25% of portfolio value."""
-    from app.data.cache import get_price
+    from app.data.cache import get_prices
     from app.models.instrument import Instrument
 
     rows = (await db.execute(
@@ -809,13 +819,15 @@ async def _recompute_weights(portfolio: Portfolio, db: AsyncSession) -> Optional
     if not rows:
         return None
 
+    try:
+        prices = await get_prices([inst.symbol for _, inst in rows], db)
+    except Exception:
+        prices = {}
+
     valued: list[tuple[Holding, str, Decimal]] = []
     total = Decimal("0")
     for h, inst in rows:
-        try:
-            price = await get_price(inst.symbol, db)
-        except Exception:
-            price = None
+        price = prices.get(inst.symbol.upper())
         val = (Decimal(str(price)) * (h.quantity or Decimal("0"))) if price else Decimal("0")
         valued.append((h, inst.sector or "Unknown", val))
         total += val
@@ -1204,6 +1216,68 @@ async def get_portfolio_risk(
     payload = jsonable_encoder(data)
     await set_cached(key, payload, 300)
     return JSONResponse(content=payload)
+
+
+@router.get("/events")
+async def get_events(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upcoming dated events for the dashboard, next 120 days, soonest first:
+    SBP MPC meetings (published calendar) + maturity / next coupon of the
+    user's held T-bills, PIBs and sukuk (PSX debt market). Every date is
+    scraped, never estimated. {events: [{date, type, title, detail, symbol}]}"""
+    from datetime import date as _date, timedelta
+    from app.core.market import get_debt_market_data, get_mpc_dates
+    from app.data.adapters.psx_debt_adapter import PSXDebtAdapter
+    from app.models.instrument import Instrument
+
+    today = _date.today()
+    horizon = today + timedelta(days=120)
+    events: list[dict] = []
+
+    for iso in await get_mpc_dates():
+        d = _date.fromisoformat(iso)
+        if today <= d <= horizon:
+            events.append({"date": iso, "type": "mpc", "title": "SBP policy rate decision",
+                           "detail": "Monetary Policy Committee meeting", "symbol": None})
+
+    try:
+        portfolio = await _load_active_portfolio(current_user, db)
+    except HTTPException:
+        portfolio = None
+    if portfolio is not None:
+        rows = (await db.execute(
+            select(Instrument).join(Holding, Holding.instrument_id == Instrument.id)
+            .where(Holding.portfolio_id == portfolio.id, Instrument.asset_class.in_(["tbill", "bond"]))
+        )).scalars().all()
+        try:
+            all_debt = await get_debt_market_data()
+        except Exception:
+            all_debt = []
+        adapter = PSXDebtAdapter()
+        for inst in rows:
+            # Placeholder symbols (MTB-3M, GIS-3Y-FRR) resolve to the on-the-run
+            # PSX security for that tenor; raw security codes match directly.
+            rec = await adapter.get_instrument(inst.symbol)
+            if rec is None:
+                same = [i for i in all_debt if adapter._yield_key(i) == inst.symbol.upper()]
+                rec = adapter._best_active_for_tenor(same) if same else None
+            if rec is None:
+                continue
+            code = rec.get("security_code") or inst.symbol
+            for kind, field, title in (("maturity", "maturity_date", "matures"),
+                                       ("coupon", "next_coupon_date", "coupon / rental due")):
+                d = adapter._parse_maturity(rec.get(field))
+                if d is None or not (today <= d <= horizon):
+                    continue
+                if kind == "coupon" and (rec.get("coupon_rate") or 0) <= 0:
+                    continue  # discount bills pay no coupon
+                events.append({"date": d.isoformat(), "type": kind,
+                               "title": f"{inst.symbol} {title}", "detail": code, "symbol": inst.symbol})
+
+    events.sort(key=lambda e: e["date"])
+    return {"events": events}
 
 
 @router.get("/holdings/{symbol}/history")
