@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { getCompanyInfo, postValuation, getTechnical, getNewsFeed, getDebtInstrument, getPortfolio, getHoldingHistory } from '@/lib/api'
+import { queryClient, qk } from '@/lib/queries'
 import { getCapabilities } from '@/lib/capabilities'
 import { ValuationCard } from '@/components/chat/cards/ValuationCard'
 import { TechnicalCard } from '@/components/chat/cards/TechnicalCard'
@@ -149,7 +150,7 @@ export default function HoldingDetail() {
     }
     setDebtSettled(false)
     getDebtInstrument(symbol).then(setDebt).catch(() => setDebt(null)).finally(() => setDebtSettled(true))
-    getPortfolio()
+    queryClient.ensureQueryData({ queryKey: qk.portfolio, queryFn: getPortfolio })
       .then((p) => setHolding(p.holdings.find((h) => h.symbol === symbol) ?? null))
       .catch(() => setHolding(null))
   }, [symbol, isFixedIncome])
@@ -180,7 +181,7 @@ export default function HoldingDetail() {
     }
     if (tab === 'news' && newsItems.length === 0 && !newsLoading) {
       setNewsLoading(true)
-      getNewsFeed()
+      queryClient.ensureQueryData({ queryKey: qk.news, queryFn: getNewsFeed })
         .then((all) => setNewsItems(all.filter((n) => n.affected_symbols?.includes(symbol ?? ''))))
         .catch(() => {})
         .finally(() => setNewsLoading(false))

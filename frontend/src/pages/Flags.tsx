@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { getFlags, dismissFlag } from '@/lib/api'
+import { useState } from 'react'
+import { useFlags, markFlagDismissed } from '@/lib/queries'
 import { FlagCard } from '@/components/layout/FlagCard'
 import { cn } from '@/lib/utils'
 import type { FlagResponse } from '@/types/api'
@@ -7,25 +7,13 @@ import type { FlagResponse } from '@/types/api'
 type Tab = 'active' | 'dismissed'
 
 export default function Flags() {
-  const [flags, setFlags] = useState<FlagResponse[]>([])
-  const [loading, setLoading] = useState(true)
+  const flagsQ = useFlags()
+  const flags: FlagResponse[] = flagsQ.data ?? []
+  const loading = flagsQ.status === 'pending'
   const [tab, setTab] = useState<Tab>('active')
 
-  useEffect(() => {
-    getFlags()
-      .then(setFlags)
-      .catch(() => {})
-      .finally(() => setLoading(false))
-  }, [])
-
-  const handleDismiss = async (id: string) => {
-    try {
-      await dismissFlag(id)
-      setFlags((prev) => prev.map((f) => (f.id === id ? { ...f, dismissed: true } : f)))
-    } catch {
-      // ignore; FlagCard shows optimistic UI
-    }
-  }
+  // FlagCard has already called the dismiss API by the time this fires.
+  const handleDismiss = (id: string) => markFlagDismissed(id)
 
   const active = flags.filter((f) => !f.dismissed)
   const dismissed = flags.filter((f) => f.dismissed)

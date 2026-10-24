@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { getNewsFeed, triggerNewsScrape, getScrapeStatus } from '@/lib/api'
+import { triggerNewsScrape, getScrapeStatus } from '@/lib/api'
+import { useNewsFeed } from '@/lib/queries'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -40,22 +41,17 @@ function formatDate(iso: string): string {
 }
 
 export default function News() {
-  const [items, setItems] = useState<NewsItemResponse[]>([])
-  const [loading, setLoading] = useState(true)
+  const newsQ = useNewsFeed()
+  const items: NewsItemResponse[] = newsQ.data ?? []
+  const loading = newsQ.status === 'pending'
   const [filter, setFilter] = useState<FilterLevel>('all')
   const [mood, setMood] = useState<FilterMood>('all')
   const [refreshing, setRefreshing] = useState(false)
   const [progress, setProgress] = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  const loadFeed = () => {
-    getNewsFeed()
-      .then(setItems)
-      .catch(() => {})
-      .finally(() => setLoading(false))
-  }
+  const loadFeed = () => { void newsQ.refetch() }
 
-  useEffect(() => { loadFeed() }, [])
   // Clean up any in-flight poll on unmount.
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current) }, [])
 
@@ -75,6 +71,11 @@ export default function News() {
       setProgress(null)
     }
     pollRef.current = setInterval(async () => {
+      // Tab hidden → skip this tick (no API calls); polling resumes on return.
+      if (document.hidden) {
+        if (Date.now() - startedAt > 90000) stop()
+        return
+      }
       try {
         const s = await getScrapeStatus()
         if (s.state === 'running' && s.sources_total) {

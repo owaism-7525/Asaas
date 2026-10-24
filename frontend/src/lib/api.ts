@@ -318,6 +318,19 @@ export function postSuggest(): Promise<PortfolioResponse> {
   return post<Record<string, unknown>>('/portfolio/suggest').then(transformPortfolio)
 }
 
+export interface DashboardEvent {
+  date: string                       // ISO yyyy-mm-dd
+  type: 'mpc' | 'maturity' | 'coupon'
+  title: string
+  detail: string
+  symbol: string | null
+}
+
+/** Upcoming SBP MPC meetings + maturities / coupons of held debt (next 120 days). */
+export function getEvents(): Promise<{ events: DashboardEvent[] }> {
+  return get('/portfolio/events')
+}
+
 export function getHoldingHistory(
   symbol: string,
 ): Promise<{ symbol: string; history: { date: string; value: string }[] }> {

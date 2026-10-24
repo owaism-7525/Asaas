@@ -1,6 +1,4 @@
-import { useEffect, useState } from 'react'
-import { getMarketSentiment } from '@/lib/api'
-import type { MarketSentimentResponse } from '@/types/api'
+import { useMarketSentiment } from '@/lib/queries'
 
 /** Map a -1…1 score to a label, colour token, and arrow. */
 function read(score: number): { label: string; cls: string; arrow: string } {
@@ -15,11 +13,7 @@ function read(score: number): { label: string; cls: string; arrow: string } {
  * portfolio math. Renders nothing until data is available.
  */
 export function MarketSentimentGauge() {
-  const [data, setData] = useState<MarketSentimentResponse | null>(null)
-
-  useEffect(() => {
-    getMarketSentiment().then(setData).catch(() => {})
-  }, [])
+  const { data } = useMarketSentiment()
 
   const market = data?.market
   if (!market) return null
@@ -30,7 +24,7 @@ export function MarketSentimentGauge() {
   const pct = Math.round(((score + 1) / 2) * 100)
 
   return (
-    <div className="bg-card border border-line rounded-[10px] p-5">
+    <div className="bg-card border border-line rounded-lg shadow-sm p-5">
       <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-ink-faint mb-3">Market Sentiment</p>
       <div className="flex items-end gap-3 mb-2">
         <span className={`font-display text-[28px] leading-[1] font-semibold tabular-nums ${cls}`}>

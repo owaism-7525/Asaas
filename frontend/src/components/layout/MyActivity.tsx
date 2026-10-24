@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button'
 import { AssetComboBox } from '@/components/ui/combobox'
 import { ASSET_UNIVERSE, type AssetCategory } from '@/data/assetUniverse'
 import { addHolding, sellHolding, updateHolding, getProfile, putProfile, getQuote } from '@/lib/api'
+import { queryClient, qk } from '@/lib/queries'
 import { cn } from '@/lib/utils'
 import type { HoldingResponse, ProfileResponse } from '@/types/api'
 
@@ -83,7 +84,7 @@ export function MyActivity({
   // Prefill the risk-profile form from the current profile when its panel opens.
   useEffect(() => {
     if (panel !== 'risk') return
-    getProfile()
+    queryClient.ensureQueryData({ queryKey: qk.profile, queryFn: getProfile })
       .then((p) => { if (p?.risk_tolerance) setRiskTol(p.risk_tolerance); if (p?.horizon) setHorizon(p.horizon) })
       .catch(() => {})
   }, [panel])
@@ -120,7 +121,7 @@ export function MyActivity({
   const updValid = !!updId && parseFloat(updPrice) >= 0
 
   return (
-    <section className="bg-card border border-line rounded-[12px] p-5 flex flex-col gap-4">
+    <section className="bg-card border border-line rounded-lg shadow-sm p-5 flex flex-col gap-4">
       <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-ink-faint">My Activity</p>
 
       <div className="flex flex-wrap gap-2">
@@ -276,10 +277,13 @@ export function MyActivity({
             💬 Ask Raabta AI
           </button>
           <ActivityFooter error={error} submitting={submitting} disabled={false} onCancel={close} onSubmit={() =>
-            run(() => putProfile({
-              risk_tolerance: riskTol as ProfileResponse['risk_tolerance'],
-              horizon: horizon as ProfileResponse['horizon'],
-            }))
+            run(async () => {
+              const p = await putProfile({
+                risk_tolerance: riskTol as ProfileResponse['risk_tolerance'],
+                horizon: horizon as ProfileResponse['horizon'],
+              })
+              queryClient.setQueryData(qk.profile, p)
+            })
           } />
         </div>
       )}

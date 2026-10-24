@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { getTicker, type TickerItem, type TickerResponse } from '@/lib/api'
+import { useMemo, useRef } from 'react'
+import { type TickerItem, type TickerResponse } from '@/lib/api'
+import { useTicker } from '@/lib/queries'
 import { useReducedMotion } from '@/hooks/useReducedMotion'
 import { cn } from '@/lib/utils'
 
@@ -205,27 +206,11 @@ function Skeleton() {
 // ---------------------------------------------------------------------------
 
 export function MarketTicker() {
-  const [response, setResponse] = useState<TickerResponse | null>(null)
-  const [loading, setLoading] = useState(true)
+  const tickerQ = useTicker()
+  const response: TickerResponse | null = tickerQ.data ?? null
+  const loading = tickerQ.status === 'pending'
   const reduced = useReducedMotion()
   const containerRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    let active = true
-
-    function fetchTicker() {
-      getTicker()
-        .then((data) => { if (active) setResponse(data) })
-        .catch(() => {})
-        .finally(() => { if (active) setLoading(false) })
-    }
-
-    fetchTicker()
-    // Refresh every 60 s so a long-open page never shows frozen prices
-    const interval = setInterval(fetchTicker, 60_000)
-
-    return () => { active = false; clearInterval(interval) }
-  }, [])
 
   const displayItems = useMemo(
     () => (response ? buildDisplayItems(response.items) : []),

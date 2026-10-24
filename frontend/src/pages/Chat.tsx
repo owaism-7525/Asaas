@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo } from 'react'
 import { useLocation } from 'react-router-dom'
 import { useChat } from '@/hooks/useChat'
 import { ChatShell } from '@/components/chat/ChatShell'
-import { getPortfolio } from '@/lib/api'
+import { usePortfolio } from '@/lib/queries'
 
 interface LocationState {
   seedMessage?: string
@@ -30,7 +30,9 @@ export default function ChatPage() {
   const { messages, isStreaming, activeTool, send, loadHistory } = useChat()
   const location = useLocation()
   const state = location.state as LocationState | null
-  const [chips, setChips] = useState<string[] | undefined>(undefined)
+  // Portfolio-aware suggestion chips (generic chips when there's no portfolio).
+  const holdings = usePortfolio().data?.holdings
+  const chips = useMemo(() => (holdings?.length ? buildChips(holdings) : undefined), [holdings])
 
   useEffect(() => {
     loadHistory().then(() => {
@@ -38,12 +40,7 @@ export default function ChatPage() {
         send(state.seedMessage)
         window.history.replaceState({}, '')
       }
-    })
-    // Portfolio-aware suggestion chips.
-    getPortfolio()
-      .then((p) => { if (p.holdings?.length) setChips(buildChips(p.holdings)) })
-      .catch(() => { /* no portfolio → generic chips */ })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    })    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // Escape AppShell's content padding so the chat input sits flush at the bottom.

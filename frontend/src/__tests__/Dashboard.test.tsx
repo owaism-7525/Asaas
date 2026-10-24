@@ -2,10 +2,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import type { PortfolioResponse, PerformanceResponse, NewsItemResponse, FlagResponse } from '@/types/api'
 
-// Dashboard keeps a module-level cache for fast back-navigation; re-import it
-// fresh per test (via resetModules in beforeEach) so that cache never leaks
-// state between tests (e.g. a cached portfolio masking an error-state test).
+// Dashboard reads through the shared TanStack Query cache; re-import it (and
+// the query client + provider) fresh per test via resetModules so cached data
+// never leaks between tests (e.g. a cached portfolio masking an error test).
 let Dashboard: (typeof import('@/pages/Dashboard'))['default']
+let renderDash: () => ReturnType<typeof render>
 
 vi.mock('react-router-dom', () => ({
   useNavigate: () => vi.fn(),
@@ -18,11 +19,22 @@ vi.mock('@/context/AuthContext', () => ({
   useAuth: () => ({ user: { id: 'u1', email: 'test@test.com' }, loading: false, signOut: vi.fn() }),
 }))
 
+vi.mock('@/context/ThemeContext', () => ({
+  useTheme: () => ({ theme: 'light', toggleTheme: vi.fn() }),
+}))
+
+vi.mock('react-chartjs-2', () => ({
+  Bar: () => <div data-testid="monthly-bars" />,
+  Line: () => <div />,
+  Doughnut: () => <div />,
+}))
+
 vi.mock('@/components/charts/PerformanceLine', () => ({
   PerformanceLine: () => <div data-testid="performance-line" />,
 }))
 
-vi.mock('@/components/charts/AllocationDonut', () => ({
+vi.mock('@/components/charts/AllocationDonut', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/components/charts/AllocationDonut')>()),
   AllocationDonut: () => <div data-testid="allocation-donut" />,
 }))
 
@@ -56,6 +68,11 @@ vi.mock('@/lib/api', () => ({
   // the gauge renders nothing and doesn't crash the Dashboard under test.
   getMarketSentiment: () => Promise.resolve({ as_of: null, market: null, sectors: [], asset_classes: [] }),
   getRiskMetrics: () => Promise.resolve({ insufficient_data: true }),
+  getProfile: () => Promise.resolve({ risk_tolerance: 'moderate', horizon: 'medium' }),
+  getWallet: () => Promise.resolve({ balance: '0' }),
+  getCashTransactions: () => Promise.resolve({ items: [], total: 0 }),
+  getEvents: () => Promise.resolve({ events: [] }),
+  getHoldingHistory: () => Promise.resolve({ symbol: '', history: [] }),
 }))
 
 const basePortfolio: PortfolioResponse = {
@@ -119,18 +136,24 @@ beforeEach(async () => {
   mockGetFlags.mockResolvedValue(baseFlags)
   mockGetRecommendation.mockRejectedValue(new Error('no recommendation'))
   Dashboard = (await import('@/pages/Dashboard')).default
+  const { QueryClientProvider } = await import('@tanstack/react-query')
+  const { queryClient } = await import('@/lib/queries')
+  queryClient.setDefaultOptions({ queries: { retry: false } })  // surface errors immediately
+  renderDash = () => render(
+    <QueryClientProvider client={queryClient}><Dashboard /></QueryClientProvider>,
+  )
 })
 
 describe('Dashboard', () => {
   it('shows loading skeleton initially', () => {
     mockGetPortfolio.mockReturnValue(new Promise(() => {}))
-    render(<Dashboard />)
+    renderDash()
     const skeletons = document.querySelectorAll('.skeleton')
     expect(skeletons.length).toBeGreaterThan(0)
   })
 
   it('renders portfolio name when portfolio exists', async () => {
-    render(<Dashboard />)
+    renderDash()
     await waitFor(() => {
       expect(screen.getByText('My Portfolio')).toBeInTheDocument()
     })
@@ -138,7 +161,7 @@ describe('Dashboard', () => {
 
   it('renders holdings count when portfolio has no name', async () => {
     mockGetPortfolio.mockResolvedValue({ ...basePortfolio, name: null })
-    render(<Dashboard />)
+    renderDash()
     await waitFor(() => {
       expect(screen.getByText('3 holdings')).toBeInTheDocument()
     })
@@ -148,7 +171,7 @@ describe('Dashboard', () => {
     // A generic error has no .status, so it's treated as transient (500/network),
     // NOT a genuine 404 — the portfolio may still exist, so don't show "build first".
     mockGetPortfolio.mockRejectedValue(new Error('network'))
-    render(<Dashboard />)
+    renderDash()
     await waitFor(() => {
       expect(screen.getByText(/Couldn't load your portfolio/)).toBeInTheDocument()
     })
@@ -156,7 +179,7 @@ describe('Dashboard', () => {
   })
 
   it('renders risk score using expected_risk', async () => {
-    render(<Dashboard />)
+    renderDash()
     await waitFor(() => {
       expect(screen.getByText('18')).toBeInTheDocument()
     })
@@ -164,7 +187,7 @@ describe('Dashboard', () => {
   })
 
   it('renders performance chart when history exists', async () => {
-    render(<Dashboard />)
+    renderDash()
     await waitFor(() => {
       expect(screen.getByTestId('performance-line')).toBeInTheDocument()
     })
@@ -172,22 +195,24 @@ describe('Dashboard', () => {
 
   it('renders "No performance data" when history is empty', async () => {
     mockGetPerformance.mockResolvedValue({ pnl_absolute: '0', pnl_percent: '0', history: [] })
-    render(<Dashboard />)
+    renderDash()
     await waitFor(() => {
       expect(screen.getByText('No performance data yet')).toBeInTheDocument()
     })
   })
 
   it('renders P&L stats correctly', async () => {
-    render(<Dashboard />)
+    renderDash()
     await waitFor(() => {
-      expect(screen.getByText('₨50K')).toBeInTheDocument()
+      // Whole rupees everywhere (₨ is a separate mono span, so match the digits).
+      // Total gain (and the change since the prior snapshot) are both +₨50,000 here.
+      expect(screen.getAllByText('50,000').length).toBeGreaterThanOrEqual(1)
     })
-    expect(screen.getByText('+5.00%')).toBeInTheDocument()
+    expect(screen.getAllByText('+5.00%').length).toBeGreaterThanOrEqual(1)
   })
 
   it('renders expected return and Sharpe', async () => {
-    render(<Dashboard />)
+    renderDash()
     await waitFor(() => {
       expect(screen.getByText('12.0%')).toBeInTheDocument()
     })
@@ -196,14 +221,15 @@ describe('Dashboard', () => {
 
   it('renders SBP rate from risk_free_rate as a percent', async () => {
     // risk_free_rate is a fraction (0.11) → must render as 11.00%, not 0.11%.
-    render(<Dashboard />)
+    renderDash()
     await waitFor(() => {
-      expect(screen.getByText('SBP 11.00%')).toBeInTheDocument()
+      expect(screen.getByText('SBP rate')).toBeInTheDocument()
+      expect(screen.getByText('11.00%')).toBeInTheDocument()
     })
   })
 
   it('renders holdings list with weights', async () => {
-    render(<Dashboard />)
+    renderDash()
     await waitFor(() => {
       expect(screen.getByText('HBL.KA')).toBeInTheDocument()
     })
@@ -214,7 +240,7 @@ describe('Dashboard', () => {
   })
 
   it('renders only active (non-dismissed) flags', async () => {
-    render(<Dashboard />)
+    renderDash()
     await waitFor(() => {
       expect(screen.getByText('Rate decision pending')).toBeInTheDocument()
     })
@@ -223,23 +249,25 @@ describe('Dashboard', () => {
 
   it('renders "All clear" when no active flags', async () => {
     mockGetFlags.mockResolvedValue([])
-    render(<Dashboard />)
+    renderDash()
     await waitFor(() => {
-      expect(screen.getByText('All clear')).toBeInTheDocument()
+      expect(screen.getByText(/All clear/)).toBeInTheDocument()
     })
   })
 
   it('renders news items with impact badges', async () => {
-    render(<Dashboard />)
+    renderDash()
     await waitFor(() => {
       expect(screen.getByText('SBP keeps rate unchanged')).toBeInTheDocument()
     })
     expect(screen.getByText('PSX hits new high')).toBeInTheDocument()
-    expect(screen.getByText(/↑.*macro/)).toBeInTheDocument()
+    // Impact is shown as an arrow badge (labelled for screen readers) + level.
+    expect(screen.getAllByLabelText('positive').length).toBe(2)
+    expect(screen.getByText('· macro')).toBeInTheDocument()
   })
 
   it('renders allocation donut when holdings exist', async () => {
-    render(<Dashboard />)
+    renderDash()
     await waitFor(() => {
       expect(screen.getByTestId('allocation-donut')).toBeInTheDocument()
     })
@@ -247,7 +275,7 @@ describe('Dashboard', () => {
 
   it('handles portfolio API error gracefully', async () => {
     mockGetPortfolio.mockRejectedValue(new Error('network'))
-    render(<Dashboard />)
+    renderDash()
     await waitFor(() => {
       expect(screen.getByText(/Couldn't load your portfolio/)).toBeInTheDocument()
     })
@@ -258,7 +286,7 @@ describe('Dashboard', () => {
     mockGetPerformance.mockRejectedValue(new Error('fail'))
     mockGetNewsFeed.mockRejectedValue(new Error('fail'))
     mockGetFlags.mockRejectedValue(new Error('fail'))
-    render(<Dashboard />)
+    renderDash()
     await waitFor(() => {
       expect(screen.getByText(/Couldn't load your portfolio/)).toBeInTheDocument()
     })

@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react'
-import { getWatchlist, addToWatchlist, removeFromWatchlist } from '@/lib/api'
+import { useState } from 'react'
+import { addToWatchlist, removeFromWatchlist } from '@/lib/api'
+import { queryClient, qk, useWatchlist } from '@/lib/queries'
 import { Button } from '@/components/ui/button'
 import { AssetComboBox } from '@/components/ui/combobox'
 import { ASSET_UNIVERSE, type AssetCategory } from '@/data/assetUniverse'
 import { cn } from '@/lib/utils'
-import type { WatchlistItem } from '@/types/api'
+import type { WatchlistItem, WatchlistResponse } from '@/types/api'
 
 // Instrument asset_class → display group
 type Group = 'stock' | 'commodity' | 'debt' | 'crypto'
@@ -49,19 +50,13 @@ function fmtPrice(item: WatchlistItem): string {
 }
 
 export default function Watchlist() {
-  const [items, setItems] = useState<WatchlistItem[]>([])
-  const [loading, setLoading] = useState(true)
+  const watchlistQ = useWatchlist()
+  const items: WatchlistItem[] = watchlistQ.data?.items ?? []
+  const loading = watchlistQ.status === 'pending'
   const [cat, setCat] = useState<AssetCategory>('stock')
   const [symbol, setSymbol] = useState('')
   const [adding, setAdding] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    getWatchlist()
-      .then((r) => setItems(r.items))
-      .catch(() => {})
-      .finally(() => setLoading(false))
-  }, [])
 
   async function add() {
     if (!symbol.trim()) return
@@ -73,8 +68,7 @@ export default function Watchlist() {
       const option = ASSET_UNIVERSE[cat].find((o) => o.symbol === symbol.trim())
       await addToWatchlist(symbol.trim(), option?.assetClass, option?.name)
       setSymbol('')
-      const r = await getWatchlist() // re-fetch so the new row carries a price
-      setItems(r.items)
+      await queryClient.invalidateQueries({ queryKey: qk.watchlist }) // re-fetch so the new row carries a price
     } catch (e) {
       setError(e instanceof Error && e.message ? e.message : 'Could not add to watchlist.')
     } finally {
@@ -83,12 +77,12 @@ export default function Watchlist() {
   }
 
   async function remove(id: string) {
-    setItems((prev) => prev.filter((i) => i.id !== id)) // optimistic
+    queryClient.setQueryData<WatchlistResponse>(qk.watchlist, (prev) =>
+      prev && { ...prev, items: prev.items.filter((i) => i.id !== id) }) // optimistic
     try {
       await removeFromWatchlist(id)
     } catch {
-      const r = await getWatchlist().catch(() => null)
-      if (r) setItems(r.items)
+      await queryClient.invalidateQueries({ queryKey: qk.watchlist })
     }
   }
 

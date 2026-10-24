@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
-import { getPortfolio, reoptimize, getDiversification } from '@/lib/api'
+import { useState } from 'react'
+import { reoptimize } from '@/lib/api'
+import { usePortfolio, useDiversification } from '@/lib/queries'
 import { AllocationDonut } from '@/components/charts/AllocationDonut'
 import { OptimizerCard } from '@/components/chat/cards/OptimizerCard'
 import { Button } from '@/components/ui/button'
@@ -16,22 +17,13 @@ function StatCell({ label, value }: { label: string; value: string }) {
 }
 
 export default function PortfolioManagement() {
-  const [portfolio, setPortfolio] = useState<PortfolioResponse | null>(null)
-  const [loading, setLoading] = useState(true)
+  const portfolioQ = usePortfolio()
+  const portfolio: PortfolioResponse | null = portfolioQ.data ?? null
+  const loading = portfolioQ.status === 'pending'
   const [draft, setDraft] = useState<PortfolioResponse | null>(null)
   const [reoptimizing, setReoptimizing] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [diversification, setDiversification] = useState<DiversificationResponse | null>(null)
-
-  useEffect(() => {
-    getPortfolio()
-      .then(setPortfolio)
-      .catch(() => {})
-      .finally(() => setLoading(false))
-    getDiversification()
-      .then(setDiversification)
-      .catch(() => {})
-  }, [])
+  const diversification: DiversificationResponse | null = useDiversification().data ?? null
 
   const handleReoptimize = async () => {
     setReoptimizing(true)

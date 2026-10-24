@@ -4,6 +4,7 @@ import type { User } from '@supabase/supabase-js'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '@/lib/supabase'
 import { postSession, getProfile, getPortfolio } from '@/lib/api'
+import { queryClient, qk } from '@/lib/queries'
 
 interface AuthContextValue {
   user: User | null
@@ -30,9 +31,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       await postSession()
       hasSyncedRef.current = true
+      queryClient.clear()  // never show a previous user's cached data
 
+      // fetchQuery seeds the shared cache, so the page we route to renders
+      // from these results instead of fetching them again.
       try {
-        await getProfile()
+        await queryClient.fetchQuery({ queryKey: qk.profile, queryFn: getProfile })
       } catch (err) {
         if ((err as { status?: number }).status === 404) {
           navigate('/onboarding', { replace: true })
@@ -42,7 +46,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       try {
-        await getPortfolio()
+        await queryClient.fetchQuery({ queryKey: qk.portfolio, queryFn: getPortfolio })
         navigate('/dashboard', { replace: true })
       } catch (err) {
         if ((err as { status?: number }).status === 404) {
@@ -75,6 +79,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const { data: listener } = supabase.auth.onAuthStateChange((event, session) => {
       if (event === 'SIGNED_OUT' || !session) {
+        queryClient.clear()
         setUser(null)
         setLoading(false)
         hasSyncedRef.current = false
