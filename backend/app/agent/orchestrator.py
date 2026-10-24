@@ -136,17 +136,15 @@ class AgentOrchestrator:
 
             if portfolio:
                 portfolio_id_str = str(portfolio.id)
+                # Holdings + their instruments in one query (outer join keeps a
+                # holding even if its instrument row is missing, as before).
                 hold_res = await db.execute(
-                    select(Holding).where(Holding.portfolio_id == portfolio.id)
+                    select(Holding, Instrument)
+                    .outerjoin(Instrument, Instrument.id == Holding.instrument_id)
+                    .where(Holding.portfolio_id == portfolio.id)
                 )
-                holdings = hold_res.scalars().all()
-
-                # Pre-load instruments for abstraction
-                for h in holdings:
-                    inst_res = await db.execute(
-                        select(Instrument).where(Instrument.id == h.instrument_id)
-                    )
-                    inst = inst_res.scalar_one_or_none()
+                for h, inst in hold_res.all():
+                    holdings.append(h)
                     if inst:
                         instruments[str(h.instrument_id)] = inst
 

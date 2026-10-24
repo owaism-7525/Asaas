@@ -284,28 +284,23 @@ async def _fetch_ticker_items(db: AsyncSession) -> Tuple[List[Dict[str, Any]], s
     async def _rates_section() -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
         try:
+            from app.core.market import get_sbp_rate
             from app.data.adapters.sbp_adapter import SBPAdapter
-            sbp = SBPAdapter()
-            sbp_rate = await sbp.fetch_policy_rate()
-            rate_pct = float(sbp_rate) * 100 if sbp_rate is not None else 20.0
-            out.append(_price_item("SBP", "SBP Policy Rate", f"{rate_pct:.2f}", "%", "rate", source="sbp"))
+            sbp_rate = await get_sbp_rate()  # cached/live, or a logged stale fallback
+            out.append(_price_item("SBP", "SBP Policy Rate", f"{float(sbp_rate) * 100:.2f}", "%", "rate", source="sbp"))
 
-            # Prefer PSX debt market (real data); fall back to SBP adapter.
-            try:
-                from app.data.adapters.psx_debt_adapter import PSXDebtAdapter
-                psx_yields = await PSXDebtAdapter().fetch_yields_by_tenor()
-                tbill_rates = psx_yields if psx_yields else await sbp.fetch_tbill_rates()
-            except Exception:
-                tbill_rates = await sbp.fetch_tbill_rates()
+            # SBP auction cut-offs (T-bills, fixed PIBs) merged with PSX debt
+            # market rates for the other tenors. Missing tenors are omitted.
+            tbill_rates = await SBPAdapter().fetch_tbill_rates()
 
             for sym, label in [("MTB-3M", "3M T-Bill"), ("MTB-6M", "6M T-Bill"), ("MTB-12M", "12M T-Bill")]:
                 if sym in tbill_rates:
-                    out.append(_price_item(sym, label, f"{float(tbill_rates[sym]) * 100:.2f}", "%", "tbill", source="psx_debt"))
+                    out.append(_price_item(sym, label, f"{float(tbill_rates[sym]) * 100:.2f}", "%", "tbill", source="sbp"))
             for sym, label in [("PIB-3Y", "3Y PIB"), ("PIB-5Y", "5Y PIB"), ("PIB-10Y", "10Y PIB")]:
                 if sym in tbill_rates:
-                    out.append(_price_item(sym, label, f"{float(tbill_rates[sym]) * 100:.2f}", "%", "tbill", source="psx_debt"))
-            if "GIS-3Y" in tbill_rates:
-                out.append(_price_item("GIS-3Y", "3Y Sukuk", f"{float(tbill_rates['GIS-3Y']) * 100:.2f}",
+                    out.append(_price_item(sym, label, f"{float(tbill_rates[sym]) * 100:.2f}", "%", "tbill", source="sbp"))
+            if "GIS-3Y-FRR" in tbill_rates:
+                out.append(_price_item("GIS-3Y", "3Y Sukuk", f"{float(tbill_rates['GIS-3Y-FRR']) * 100:.2f}",
                                        "%", "tbill", source="psx_debt"))
         except Exception:
             logger.warning("SBP/PSX debt ticker fetch failed — returning empty rates section")

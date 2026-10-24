@@ -1,7 +1,8 @@
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '@/context/AuthContext'
-import { getProfile, putProfile } from '@/lib/api'
-import { useEffect, useState } from 'react'
+import { putProfile } from '@/lib/api'
+import { queryClient, qk, useProfile } from '@/lib/queries'
+import { useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -41,7 +42,7 @@ const fieldCls = cn(
 export default function Settings() {
   const navigate = useNavigate()
   const { user, signOut } = useAuth()
-  const [profile, setProfile] = useState<ProfileResponse | null>(null)
+  const profile: ProfileResponse | null = useProfile().data ?? null
 
   const [editing, setEditing] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -49,10 +50,6 @@ export default function Settings() {
   const [editRisk, setEditRisk] = useState('')
   const [editHorizon, setEditHorizon] = useState('')
   const [editGoal, setEditGoal] = useState('')
-
-  useEffect(() => {
-    getProfile().then(setProfile).catch(() => {})
-  }, [])
 
   const startEdit = () => {
     if (!profile) return
@@ -77,7 +74,7 @@ export default function Settings() {
         horizon: editHorizon as ProfileResponse['horizon'],
         goal: editGoal,
       })
-      setProfile(updated)
+      queryClient.setQueryData(qk.profile, updated)
       setEditing(false)
     } catch (e) {
       setSaveError(e instanceof Error ? e.message : 'Failed to save. Please try again.')

@@ -29,6 +29,7 @@ redis[hiredis]>=6.2.0
 
 # --- HTTP ---
 httpx>=0.28.1
+curl_cffi>=0.15.0  # Chrome TLS fingerprint for Cloudflare-fronted sbp.org.pk
 aiohttp>=3.12.6
 
 # --- LLM / Agent ---
@@ -51,6 +52,7 @@ playwright>=1.52.0
 
 # --- Scheduling ---
 apscheduler>=3.11.0
+tzdata>=2024.1  # IANA zones (Asia/Karachi) on Windows + slim images
 
 # --- Utilities ---
 python-dotenv>=1.1.0

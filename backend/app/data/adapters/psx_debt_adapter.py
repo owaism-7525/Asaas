@@ -116,29 +116,45 @@ class PSXDebtAdapter:
             for idx, table in enumerate(tables):
                 category = category_map.get(idx, f"unknown_{idx}")
                 rows = table.find_all("tr")
-                for row in rows:
-                    cells = row.find_all(["td", "th"])
-                    if len(cells) < 12:
-                        continue
-                    cell_texts = [_clean(c.get_text()) for c in cells]
+                if not rows:
+                    continue
+                # Columns are located by header text, not position: the
+                # Government Debt table omits Face Value / Listing Date.
+                # "Coupon/ Rental" vs "Coupon/Rental" spacing is normalised.
+                header = [_clean(c.get_text()).lower().replace("/ ", "/") for c in rows[0].find_all(["td", "th"])]
+                col = {name: i for i, name in enumerate(header)}
+                if "security code" not in col:
+                    continue
 
-                    if cell_texts[0] in ("Security Code", ""):
+                def cell(texts: List[str], *names: str) -> str:
+                    for n in names:
+                        i = col.get(n)
+                        if i is not None and i < len(texts):
+                            return texts[i]
+                    return ""
+
+                for row in rows[1:]:
+                    cell_texts = [_clean(c.get_text()) for c in row.find_all(["td", "th"])]
+                    if len(cell_texts) < len(header) or not cell_texts[0]:
                         continue
 
-                    coupon = _parse_pct(cell_texts[7])
-                    remaining = _parse_decimal(cell_texts[11])
+                    coupon = _parse_pct(cell(cell_texts, "coupon/rental rate"))
+                    remaining = _parse_decimal(cell(cell_texts, "remaining years"))
+                    face = _parse_decimal(cell(cell_texts, "face value"))
+                    size = _parse_issue_size(cell(cell_texts, "issue size"))
+                    days = _parse_decimal(cell(cell_texts, "outstanding days"))
                     inst = {
-                        "security_code": cell_texts[0],
-                        "security_name": cell_texts[1],
-                        "face_value": float(v) if (v := _parse_decimal(cell_texts[2])) is not None else None,
-                        "listing_date": cell_texts[3],
-                        "issue_date": cell_texts[4],
-                        "issue_size": float(v) if (v := _parse_issue_size(cell_texts[5])) is not None else None,
-                        "maturity_date": cell_texts[6],
+                        "security_code": cell(cell_texts, "security code"),
+                        "security_name": cell(cell_texts, "security name"),
+                        "face_value": float(face) if face is not None else None,
+                        "listing_date": cell(cell_texts, "listing date"),
+                        "issue_date": cell(cell_texts, "issue date"),
+                        "issue_size": float(size) if size is not None else None,
+                        "maturity_date": cell(cell_texts, "maturity date"),
                         "coupon_rate": float(coupon) if coupon is not None else None,
-                        "prev_coupon_date": cell_texts[8],
-                        "next_coupon_date": cell_texts[9],
-                        "outstanding_days": float(v) if (v := _parse_decimal(cell_texts[10])) is not None else None,
+                        "prev_coupon_date": cell(cell_texts, "previous coupon/rental date"),
+                        "next_coupon_date": cell(cell_texts, "next coupon/rental date"),
+                        "outstanding_days": float(days) if days is not None else None,
                         "remaining_years": float(remaining) if remaining is not None else None,
                         "category": category,
                     }
@@ -299,55 +315,42 @@ class PSXDebtAdapter:
             if inst["category"] == "govt_debt"
         }
 
+    @staticmethod
+    def _yield_key(inst: Dict[str, Any]) -> Optional[str]:
+        """Tenor key for yield reporting: PIB-nY from govt debt, GIS-nY-FRR/VRR
+        from GoP Ijarah Sukuk codes (P03FRR…, P05VRR…). T-bills never get a key —
+        they are discount instruments listed at 0% coupon, so the page carries
+        no yield for them (SBP auction cut-offs supply those)."""
+        code = (inst.get("security_code") or "").upper()
+        if inst.get("category") == "gop_sukuk":
+            m = re.match(r"P(\d{2})(FRR|VRR)", code)
+            return f"GIS-{int(m.group(1))}Y-{m.group(2)}" if m else None
+        if inst.get("category") != "govt_debt" or code.startswith("PK"):
+            return None
+        m = re.match(r"P(\d{2})P(?:IB|FL)", code)  # P10PIB… fixed, P10PFL… floater
+        return f"PIB-{int(m.group(1))}Y" if m else None
+
     async def fetch_yields_by_tenor(self) -> Dict[str, Decimal]:
         """
-        Extract representative yields by tenor from government securities.
-        Returns dict like {"MTB-3M": Decimal("0.20"), "PIB-5Y": Decimal("0.15"), ...}
-        Picks the most recently issued active instrument for each tenor.
+        Representative yield per tenor from the PSX debt market page, e.g.
+        {"PIB-10Y": Decimal("0.1250"), "GIS-3Y-FRR": Decimal("0.12"), ...}.
+
+        Per tenor: the most recently ISSUED instrument that has not matured and
+        carries a non-zero coupon/rental rate (the on-the-run issue, whose rate
+        reflects current market levels). No T-bill keys — see ``_yield_key``.
+        Returns {} when the page can't be scraped; never fabricates a rate.
         """
-        all_inst = await self.fetch_all_instruments()
-        tenor_map: Dict[str, Dict[str, Any]] = {}
-
-        for inst in all_inst:
-            if inst["category"] != "govt_debt":
+        today = date.today()
+        best: Dict[str, tuple] = {}
+        for inst in await self.fetch_all_instruments():
+            key = self._yield_key(inst)
+            rate = inst.get("coupon_rate")
+            if key is None or rate is None or rate <= 0:
                 continue
-            if inst["coupon_rate"] is None:
+            maturity = self._parse_maturity(inst.get("maturity_date"))
+            if maturity is None or maturity <= today:
                 continue
-            if inst["remaining_years"] is not None and inst["remaining_years"] < 0:
-                continue
-
-            code = inst["security_code"]
-            name = inst["security_name"].lower()
-
-            tenor_key = None
-            if "1-month" in name or "1 month" in name or code.startswith("PK01TB"):
-                tenor_key = "MTB-1M"
-            elif "3-month" in name or "3 month" in name or code.startswith("PK03TB"):
-                tenor_key = "MTB-3M"
-            elif "6-month" in name or "6 month" in name or code.startswith("PK06TB"):
-                tenor_key = "MTB-6M"
-            elif "12-month" in name or "12 month" in name or code.startswith("PK12TB"):
-                tenor_key = "MTB-12M"
-            elif "2-year" in name or "2 year" in name or code.startswith("P02"):
-                tenor_key = "PIB-2Y"
-            elif "3-year" in name or "3 year" in name or code.startswith("P03"):
-                tenor_key = "PIB-3Y"
-            elif "5-year" in name or "5 year" in name or code.startswith("P05"):
-                tenor_key = "PIB-5Y"
-            elif "7-year" in name or "7 year" in name or code.startswith("P07"):
-                tenor_key = "PIB-7Y"
-            elif "10-year" in name or "10 year" in name or code.startswith("P10"):
-                tenor_key = "PIB-10Y"
-            elif "20-year" in name or "20 year" in name or code.startswith("P20"):
-                tenor_key = "PIB-20Y"
-            elif "sukuk" in name or "gis" in name:
-                tenor_key = "GIS-3Y"
-
-            if tenor_key and tenor_key not in tenor_map:
-                tenor_map[tenor_key] = inst
-
-        return {
-            k: v["coupon_rate"]
-            for k, v in tenor_map.items()
-            if v["coupon_rate"] is not None
-        }
+            issued = self._parse_maturity(inst.get("issue_date")) or date.min
+            if key not in best or issued > best[key][0]:
+                best[key] = (issued, rate)
+        return {k: Decimal(str(rate)) for k, (_, rate) in best.items()}

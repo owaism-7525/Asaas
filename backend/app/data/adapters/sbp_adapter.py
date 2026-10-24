@@ -20,10 +20,10 @@ from __future__ import annotations
 import logging
 import re
 from decimal import Decimal, InvalidOperation
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 from datetime import date, datetime, timezone
 
-import httpx
+from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger("asaas.sbp_adapter")
@@ -61,9 +61,17 @@ class SBPAdapter:
     def __init__(self):
         self.homepage_url = "https://www.sbp.org.pk/index.html"
         self.monetary_policy_url = "https://www.sbp.org.pk/monetary_policy/index.asp"
-        self.auction_url = "https://www.sbp.org.pk/daod/sdma.asp"
+        # Latest-auction cut-offs are published on the homepage (sdma.asp now redirects there).
+        self.auction_url = "https://www.sbp.org.pk/"
         self.key_rates_url = "https://www.sbp.org.pk/keyrates/keyrates.asp"
         self.headers = _HEADERS
+
+    async def _get(self, url: str):
+        """GET with a Chrome TLS fingerprint. sbp.org.pk sits behind Cloudflare,
+        which 403s httpx's handshake even with browser headers; curl_cffi's
+        Chrome impersonation passes. Response exposes .status_code / .text."""
+        async with AsyncSession(impersonate="chrome", timeout=15.0) as session:
+            return await session.get(url, headers=self.headers, allow_redirects=True)
 
     # ------------------------------------------------------------------
     # Policy rate
@@ -100,8 +108,7 @@ class SBPAdapter:
 
     async def _scrape_homepage_policy_rate(self) -> Optional[Decimal]:
         try:
-            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-                resp = await client.get(self.homepage_url, headers=self.headers)
+            resp = await self._get(self.homepage_url)
             if resp.status_code != 200:
                 logger.warning("SBP homepage returned %s", resp.status_code)
                 return None
@@ -166,8 +173,7 @@ class SBPAdapter:
 
     async def _scrape_monetary_policy_page(self) -> Optional[Decimal]:
         try:
-            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-                resp = await client.get(self.monetary_policy_url, headers=self.headers)
+            resp = await self._get(self.monetary_policy_url)
             if resp.status_code != 200:
                 return None
 
@@ -197,8 +203,7 @@ class SBPAdapter:
 
     async def _scrape_key_rates(self) -> Optional[Decimal]:
         try:
-            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-                resp = await client.get(self.key_rates_url, headers=self.headers)
+            resp = await self._get(self.key_rates_url)
             if resp.status_code != 200:
                 return None
 
@@ -232,160 +237,97 @@ class SBPAdapter:
 
     async def fetch_tbill_rates(self) -> Dict[str, Decimal]:
         """
-        Fetch yields for government securities (MTBs, PIBs, GIS).
-        Returns a dictionary mapping instrument symbol to yield/rental rate Decimal.
+        Yields for government securities, keyed by instrument symbol
+        (MTB-3M, PIB-5Y, GIS-3Y-FRR, ...), as Decimal fractions.
+
+        1. SBP latest-auction cut-off yields (MTBs + fixed-rate PIBs) — the
+           market clearing yields, and the only live source for T-bills.
+        2. PSX debt market (dps.psx.com.pk/debt-market) fills every other
+           tenor from the on-the-run issue's coupon/rental rate (PIB-15Y/20Y,
+           GIS sukuk, ...).
+
+        Returns only what was actually scraped — {} if both sources fail.
+        Never fabricates a yield: callers treat a missing tenor as unavailable.
         """
-        fallbacks = {
-            "MTB-3M": Decimal("0.2010"),
-            "MTB-6M": Decimal("0.2015"),
-            "MTB-12M": Decimal("0.2025"),
-            "PIB-3Y": Decimal("0.2150"),
-            "PIB-5Y": Decimal("0.2200"),
-            "PIB-10Y": Decimal("0.2275"),
-            "PIB-20Y": Decimal("0.2350"),
-            "GIS-3Y-FRR": Decimal("0.2125"),
-            "GIS-3Y-VRR": Decimal("0.2050"),
-        }
+        from app.data.adapters.psx_debt_adapter import PSXDebtAdapter
 
-        # Strategy 1: scrape the auction results page
-        scraped = await self._scrape_auction_results()
-        if scraped:
-            logger.info("Scraped %d T-bill yields from SBP auction page", len(scraped))
-            return scraped
-
-        # Strategy 2: scrape the key rates page
-        scraped = await self._scrape_key_rates_yields()
-        if scraped:
-            logger.info("Scraped %d yields from SBP key rates page", len(scraped))
-            return scraped
-
-        logger.warning("All SBP yield sources failed. Using fallback defaults.")
-        return fallbacks
-
-    async def _scrape_auction_results(self) -> Dict[str, Decimal]:
-        """Scrape SBP auction results page for T-bill cut-off yields."""
         try:
-            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-                resp = await client.get(self.auction_url, headers=self.headers)
-            if resp.status_code != 200:
-                logger.warning("SBP auction page returned %s", resp.status_code)
-                return {}
-
-            soup = BeautifulSoup(resp.text, "lxml")
-            yields: Dict[str, Decimal] = {}
-
-            # Look for tables with auction data
-            tables = soup.find_all("table")
-            for table in tables:
-                rows = table.find_all("tr")
-                for row in rows:
-                    cells = row.find_all(["td", "th"])
-                    if len(cells) < 2:
-                        continue
-                    row_text = _clean(row.get_text()).lower()
-
-                    # Match MTB tenors: 3-month, 6-month, 12-month
-                    mtb_map = [
-                        (r"3[\s-]*month|3m\b|03\s*month", "MTB-3M"),
-                        (r"6[\s-]*month|6m\b|06\s*month", "MTB-6M"),
-                        (r"12[\s-]*month|12m\b|1yr|1[\s-]*year", "MTB-12M"),
-                    ]
-                    for pat, sym in mtb_map:
-                        if re.search(pat, row_text, re.IGNORECASE) and sym not in yields:
-                            # Find the yield — usually the last numeric cell or a cell with %
-                            for cell in reversed(cells):
-                                cell_text = _clean(cell.get_text())
-                                rate = _parse_pct(cell_text)
-                                if rate is not None and Decimal("0.05") < rate < Decimal("0.50"):
-                                    yields[sym] = rate
-                                    break
-                            # Also try all cells in case the % is in an earlier column
-                            if sym not in yields:
-                                for cell in cells:
-                                    rate = _parse_pct(_clean(cell.get_text()))
-                                    if rate is not None and Decimal("0.05") < rate < Decimal("0.50"):
-                                        yields[sym] = rate
-                                        break
-
-                    # Match PIB tenors
-                    pib_map = [
-                        (r"3[\s-]*year|3y\b", "PIB-3Y"),
-                        (r"5[\s-]*year|5y\b", "PIB-5Y"),
-                        (r"10[\s-]*year|10y\b", "PIB-10Y"),
-                        (r"20[\s-]*year|20y\b", "PIB-20Y"),
-                    ]
-                    for pat, sym in pib_map:
-                        if re.search(pat, row_text, re.IGNORECASE) and sym not in yields:
-                            for cell in reversed(cells):
-                                rate = _parse_pct(_clean(cell.get_text()))
-                                if rate is not None and Decimal("0.05") < rate < Decimal("0.50"):
-                                    yields[sym] = rate
-                                    break
-
-                    # Match GIS / Sukuk
-                    if re.search(r"sukuk|gis|islamic", row_text, re.IGNORECASE):
-                        for cell in reversed(cells):
-                            rate = _parse_pct(_clean(cell.get_text()))
-                            if rate is not None and Decimal("0.05") < rate < Decimal("0.50"):
-                                if "GIS-3Y-FRR" not in yields:
-                                    yields["GIS-3Y-FRR"] = rate
-                                break
-
-            # If no yields found in tables, try the full-page text approach
-            if not yields:
-                full_text = _clean(soup.get_text())
-                yields = self._extract_yields_from_text(full_text)
-
-            return yields
-
+            psx = await PSXDebtAdapter().fetch_yields_by_tenor()
         except Exception as e:
-            logger.error("Error scraping SBP auction results: %s", e)
-            return {}
+            logger.warning("PSX debt market yields unavailable: %s", e)
+            psx = {}
+        sbp = await self._scrape_auction_cutoffs()
 
-    async def _scrape_key_rates_yields(self) -> Dict[str, Decimal]:
-        """Scrape the key rates page for government securities yields."""
-        try:
-            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-                resp = await client.get(self.key_rates_url, headers=self.headers)
-            if resp.status_code != 200:
-                return {}
-
-            soup = BeautifulSoup(resp.text, "lxml")
-            full_text = _clean(soup.get_text())
-            return self._extract_yields_from_text(full_text)
-
-        except Exception as e:
-            logger.error("Error scraping SBP key rates for yields: %s", e)
-            return {}
-
-    def _extract_yields_from_text(self, text: str) -> Dict[str, Decimal]:
-        """Extract government securities yields from a block of text using pattern matching."""
-        yields: Dict[str, Decimal] = {}
-
-        # Pattern: tenor keyword near a percentage
-        patterns = [
-            (r"3[\s-]*month[^%]{0,40}?(\d{1,2}\.\d{1,4})\s*%", "MTB-3M"),
-            (r"6[\s-]*month[^%]{0,40}?(\d{1,2}\.\d{1,4})\s*%", "MTB-6M"),
-            (r"12[\s-]*month[^%]{0,40}?(\d{1,2}\.\d{1,4})\s*%", "MTB-12M"),
-            (r"3[\s-]*year[^%]{0,40}?(\d{1,2}\.\d{1,4})\s*%", "PIB-3Y"),
-            (r"5[\s-]*year[^%]{0,40}?(\d{1,2}\.\d{1,4})\s*%", "PIB-5Y"),
-            (r"10[\s-]*year[^%]{0,40}?(\d{1,2}\.\d{1,4})\s*%", "PIB-10Y"),
-            (r"20[\s-]*year[^%]{0,40}?(\d{1,2}\.\d{1,4})\s*%", "PIB-20Y"),
-            (r"sukuk[^%]{0,40}?(\d{1,2}\.\d{1,4})\s*%", "GIS-3Y-FRR"),
-        ]
-
-        for pat, sym in patterns:
-            if sym not in yields:
-                m = re.search(pat, text, re.IGNORECASE)
-                if m:
-                    try:
-                        rate = Decimal(m.group(1)) / Decimal("100")
-                        if Decimal("0.05") < rate < Decimal("0.50"):
-                            yields[sym] = rate
-                    except InvalidOperation:
-                        continue
-
+        yields = {**psx, **sbp}  # SBP auction cut-offs win where both exist
+        if yields:
+            logger.info("Govt yields: %d from SBP auctions, %d from PSX debt market",
+                        len(sbp), len(set(psx) - set(sbp)))
+        else:
+            logger.warning("No govt securities yields available (SBP and PSX both failed)")
         return yields
+
+    async def _scrape_auction_cutoffs(self) -> Dict[str, Decimal]:
+        """Parse the homepage "Cut-off Rates in the Latest Auctions" block:
+        ``MTBs Tenor Cut-off Yield 1-M 11.5003% 3-M ...`` and
+        ``Fixed - Rate PIB Tenor Cut-off Yield 2-Y 12.3990% ...``.
+        Tenors marked "Bids Rejected" are skipped (no clearing yield)."""
+        try:
+            resp = await self._get(self.auction_url)
+            if resp.status_code != 200:
+                logger.warning("SBP auction cut-offs returned %s", resp.status_code)
+                return {}
+            text = _clean(BeautifulSoup(resp.text, "lxml").get_text(" "))
+
+            yields: Dict[str, Decimal] = {}
+            sections = [
+                (r"MTBs\s+Tenor\s+Cut-off\s+Yield(.*?)\(as on", "M", "MTB-{n}M"),
+                (r"Fixed\s*-\s*Rate\s+PIB\s+Tenor\s+Cut-off\s+Yield(.*?)\(as on", "Y", "PIB-{n}Y"),
+            ]
+            for section_pat, unit, key_fmt in sections:
+                m = re.search(section_pat, text, re.IGNORECASE)
+                if not m:
+                    continue
+                for n, pct in re.findall(rf"(\d{{1,2}})-{unit}\s+(\d{{1,2}}\.\d{{1,4}})\s*%", m.group(1)):
+                    yields[key_fmt.format(n=int(n))] = Decimal(pct) / Decimal("100")
+            if not yields:
+                logger.warning("SBP auction cut-off block not found on %s", self.auction_url)
+            return yields
+        except Exception as e:
+            logger.error("Error scraping SBP auction cut-offs: %s", e)
+            return {}
+
+    # ------------------------------------------------------------------
+    # Monetary Policy Committee calendar
+    # ------------------------------------------------------------------
+
+    async def fetch_mpc_dates(self) -> List[date]:
+        """MPC meeting dates from SBP's published "Advance Calendar of MPC
+        Meetings" table (first column, e.g. ``26-Oct-26``). [] on failure."""
+        try:
+            resp = await self._get("https://www.sbp.org.pk/our-operations/monetary-policy")
+            if resp.status_code != 200:
+                logger.warning("SBP monetary policy page returned %s", resp.status_code)
+                return []
+            soup = BeautifulSoup(resp.text, "lxml")
+            dates: List[date] = []
+            for table in soup.find_all("table"):
+                rows = table.find_all("tr")
+                if not rows or "MPC Meeting Date" not in rows[0].get_text(" ", strip=True):
+                    continue
+                for row in rows[1:]:
+                    cells = row.find_all(["td", "th"])
+                    if not cells:
+                        continue
+                    try:
+                        dates.append(datetime.strptime(_clean(cells[0].get_text()), "%d-%b-%y").date())
+                    except ValueError:
+                        continue
+            if not dates:
+                logger.warning("SBP MPC calendar table not found")
+            return sorted(dates)
+        except Exception as e:
+            logger.error("Error scraping SBP MPC calendar: %s", e)
+            return []
 
     # ------------------------------------------------------------------
     # Auction calendar (informational)

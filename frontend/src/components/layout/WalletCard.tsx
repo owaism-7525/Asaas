@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { Button } from '@/components/ui/button'
-import { getWallet, depositCash, withdrawCash, getCashTransactions } from '@/lib/api'
+import { depositCash, withdrawCash } from '@/lib/api'
+import { queryClient, qk, useWallet, useCashTransactions, invalidateCash } from '@/lib/queries'
 import { cn } from '@/lib/utils'
+import { Money } from '@/components/dashboard/primitives'
 import type { CashTransaction } from '@/types/api'
 
 type Panel = 'deposit' | 'withdraw' | null
@@ -14,7 +16,7 @@ const labelCls = 'font-sans text-[11px] font-medium text-ink mb-1 block'
 
 const fmtPkr = (v: string | number) => {
   const n = typeof v === 'string' ? parseFloat(v) : v
-  return `₨${n.toLocaleString('en-PK', { maximumFractionDigits: 2 })}`
+  return `₨${Math.round(n).toLocaleString('en-PK', { maximumFractionDigits: 0 })}`
 }
 
 // deposit / sell add cash; withdrawal / buy remove it
@@ -27,31 +29,15 @@ const TXN_LABEL: Record<string, string> = {
   sell: 'Sell',
 }
 
-export function WalletCard({ refreshKey = 0, onBalance }: {
-  refreshKey?: number
-  onBalance?: (balance: number) => void  // lets the Dashboard include cash in total value
-}) {
-  const [balance, setBalance] = useState<string | null>(null)
-  const [txns, setTxns] = useState<CashTransaction[]>([])
+export function WalletCard() {
+  // Shared cache: the Dashboard reads the same wallet query for its total value,
+  // and buys/sells elsewhere invalidate it.
+  const balance = useWallet().data?.balance ?? null
+  const txns: CashTransaction[] = useCashTransactions(10).data?.items ?? []
   const [panel, setPanel] = useState<Panel>(null)
   const [amount, setAmount] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
-  // Ref keeps `load` stable even when the parent passes an inline callback.
-  const onBalanceRef = useRef(onBalance)
-  onBalanceRef.current = onBalance
-
-  const load = useCallback(async () => {
-    const [w, t] = await Promise.allSettled([getWallet(), getCashTransactions(10)])
-    if (w.status === 'fulfilled') {
-      setBalance(w.value.balance)
-      onBalanceRef.current?.(parseFloat(w.value.balance))
-    }
-    if (t.status === 'fulfilled') setTxns(t.value.items)
-  }, [])
-
-  useEffect(() => { void load() }, [load, refreshKey])
 
   const openPanel = (p: Panel) => {
     setError(null)
@@ -65,11 +51,10 @@ export function WalletCard({ refreshKey = 0, onBalance }: {
     try {
       const fn = panel === 'deposit' ? depositCash : withdrawCash
       const w = await fn(amount)
-      setBalance(w.balance)
-      onBalanceRef.current?.(parseFloat(w.balance))
+      queryClient.setQueryData(qk.wallet, w)
       setPanel(null)
       setAmount('')
-      await load()
+      await invalidateCash()
     } catch (e) {
       setError(e instanceof Error && e.message ? e.message : 'Something went wrong.')
     } finally {
@@ -80,12 +65,12 @@ export function WalletCard({ refreshKey = 0, onBalance }: {
   const amountValid = parseFloat(amount) > 0
 
   return (
-    <div className="bg-card border border-line rounded-[10px] p-5">
+    <div className="bg-card border border-line rounded-lg shadow-sm p-5">
       <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-ink-faint mb-3">Cash Wallet</p>
 
       <div className="flex items-end gap-2 mb-3">
         <span className="font-display text-[26px] leading-[1] font-semibold text-ink tabular-nums">
-          {balance === null ? '—' : fmtPkr(balance)}
+          {balance === null ? '—' : <Money value={parseFloat(balance)} symbolClassName="text-[0.65em] text-ink-soft mr-0.5" />}
         </span>
         <span className="font-mono text-[11px] text-ink-faint mb-0.5">PKR</span>
       </div>

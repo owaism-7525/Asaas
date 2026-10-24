@@ -1,4 +1,4 @@
-import { memo, useMemo } from 'react'
+import { memo, useMemo, type ReactNode } from 'react'
 import { Doughnut } from 'react-chartjs-2'
 import {
   Chart as ChartJS,
@@ -12,21 +12,23 @@ import { cssVarRgb } from '@/lib/themeColor'
 ChartJS.register(ArcElement, Tooltip)
 
 /**
- * Canonical per-asset-class colour palette.
- * equity = jade green, crypto = purple, tbill/bond = amber, commodity = coral.
+ * Canonical per-asset-class colour palette — the brand's --ac-* tokens
+ * (jade = stocks, plum = crypto, slate = T-bills/bonds, gold = commodities,
+ * teal = funds), so charts and chips match and follow light/dark theme.
  */
-export const ASSET_CLASS_COLORS: Record<string, string> = {
-  equity: '#1D9E75',
-  stock: '#1D9E75',
-  psx_stock: '#1D9E75',
-  crypto: '#7F77DD',
-  tbill: '#BA7517',
-  bond: '#BA7517',
-  commodity: '#D85A30',
-  fund: '#3E7C8C',
+const ASSET_CLASS_TOKEN: Record<string, string> = {
+  equity: '--ac-stock',
+  stock: '--ac-stock',
+  psx_stock: '--ac-stock',
+  global_stock: '--ac-stock',
+  crypto: '--ac-crypto',
+  tbill: '--ac-tbill',
+  bond: '--ac-tbill',
+  commodity: '--ac-commodity',
+  fund: '--ac-fund',
 }
 
-const FALLBACK_COLOR = '#A0ADB8'
+const FALLBACK_TOKEN = '--ink-faint'
 
 /** Human-readable asset-class label used in donut labels and legends. */
 export function assetClassLabel(ac?: string): string {
@@ -43,8 +45,14 @@ export function assetClassLabel(ac?: string): string {
   }
 }
 
-export function assetClassColor(ac?: string): string {
-  return ASSET_CLASS_COLORS[(ac ?? '').toLowerCase()] ?? FALLBACK_COLOR
+/** Resolved colour for an asset class (reads the live theme's CSS token). */
+export function assetClassColor(ac?: string, alpha = 1): string {
+  return cssVarRgb(ASSET_CLASS_TOKEN[(ac ?? '').toLowerCase()] ?? FALLBACK_TOKEN, alpha)
+}
+
+/** CSS-variable name for an asset class, for Tailwind-free inline styles. */
+export function assetClassToken(ac?: string): string {
+  return ASSET_CLASS_TOKEN[(ac ?? '').toLowerCase()] ?? FALLBACK_TOKEN
 }
 
 /** Build the "SYMBOL (Asset)" label for a holding. */
@@ -64,7 +72,7 @@ interface AllocationDonutProps {
   /** Center label override — defaults to "Allocation" */
   centerLabel?: string
   /** Optional value shown under the center label (e.g. total portfolio value). */
-  centerValue?: string
+  centerValue?: ReactNode
 }
 
 function AllocationDonutImpl({

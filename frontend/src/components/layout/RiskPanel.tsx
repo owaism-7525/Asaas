@@ -1,6 +1,4 @@
-import { useEffect, useState } from 'react'
-import { getRiskMetrics } from '@/lib/api'
-import type { RiskMetricsResponse } from '@/types/api'
+import { useRiskMetrics } from '@/lib/queries'
 
 const pct = (v?: number | null) => (v == null ? '—' : `${(v * 100).toFixed(1)}%`)
 const num = (v?: number | null) => (v == null ? '—' : v.toFixed(2))
@@ -10,12 +8,8 @@ const num = (v?: number | null) => (v == null ? '—' : v.toFixed(2))
  * backfilled price history (/portfolio/risk). Renders nothing until there's
  * enough overlapping history. Read-only; mirrors MarketSentimentGauge.
  */
-export function RiskPanel() {
-  const [data, setData] = useState<RiskMetricsResponse | null>(null)
-
-  useEffect(() => {
-    getRiskMetrics().then(setData).catch(() => {})
-  }, [])
+export function RiskPanel({ variant = 'list' }: { variant?: 'list' | 'grid' }) {
+  const { data } = useRiskMetrics()
 
   if (!data || data.insufficient_data) return null
 
@@ -30,8 +24,36 @@ export function RiskPanel() {
     { label: 'Beta (vs PSX)', value: num(data.beta_vs_kse_proxy?.value) },
   ]
 
+  const asOf = data.as_of && (
+    <p className="font-mono text-[10px] text-ink-faint">
+      {data.observations ?? 0} obs · as of {data.as_of}
+    </p>
+  )
+
+  // Wide dashboard row: metrics as a dense tile grid.
+  if (variant === 'grid') {
+    return (
+      <div className="bg-card border border-line rounded-lg shadow-sm p-5">
+        <div className="flex items-center justify-between gap-2 mb-3">
+          <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-ink-faint">Risk analytics</p>
+          {asOf}
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          {rows.map((r) => (
+            <div key={r.label} className="rounded-md bg-paper px-3 py-2.5 flex flex-col gap-1 min-w-0">
+              <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-ink-faint truncate">{r.label}</span>
+              <span className={`font-mono text-[16px] tabular-nums ${r.tone === 'loss' ? 'text-loss' : 'text-ink'}`}>
+                {r.value}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
   return (
-    <div className="bg-card border border-line rounded-[10px] p-5">
+    <div className="bg-card border border-line rounded-lg shadow-sm p-5">
       <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-ink-faint mb-3">Risk</p>
       <div className="flex flex-col gap-2">
         {rows.map((r) => (
@@ -43,11 +65,7 @@ export function RiskPanel() {
           </div>
         ))}
       </div>
-      {data.as_of && (
-        <p className="font-mono text-[10px] text-ink-faint mt-3">
-          {data.observations ?? 0} obs · as of {data.as_of}
-        </p>
-      )}
+      {asOf && <div className="mt-3">{asOf}</div>}
     </div>
   )
 }

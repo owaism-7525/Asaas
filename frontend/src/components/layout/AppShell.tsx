@@ -1,4 +1,3 @@
-import { useEffect, useState } from 'react'
 import { Outlet, Link } from 'react-router-dom'
 import { User, Sun, Moon } from 'lucide-react'
 import { useAuth } from '@/context/AuthContext'
@@ -6,19 +5,13 @@ import { useTheme } from '@/context/ThemeContext'
 import { NavBar } from './NavBar'
 import { MarketTicker } from './MarketTicker'
 import { RaabtaAI } from './RaabtaAI'
-import { getFlags } from '@/lib/api'
+import { useFlags } from '@/lib/queries'
 import { cn } from '@/lib/utils'
 
 export function AppShell() {
   const { user } = useAuth()
   const { theme, toggleTheme } = useTheme()
-  const [flagCount, setFlagCount] = useState(0)
-
-  useEffect(() => {
-    getFlags()
-      .then((flags) => setFlagCount(flags.filter((f) => !f.dismissed).length))
-      .catch(() => {})
-  }, [])
+  const flagCount = (useFlags().data ?? []).filter((f) => !f.dismissed).length
 
   const initials = user?.email?.slice(0, 2).toUpperCase() ?? '??'
 
